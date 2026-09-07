@@ -1,0 +1,95 @@
+name: Build WISEOverlayKit dylib
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "WISEOverlayKit/**"
+      - ".github/workflows/build-dylib.yml"
+
+jobs:
+  build-dylib:
+    runs-on: macos-latest
+
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      IOS_DEPLOYMENT_TARGET: "14.0"
+      IOS_ARCH: arm64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select the stable Xcode toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Compile WISEOverlayKit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          CLANG="$(xcrun --sdk iphoneos -f clang)"
+          SWIFTC="$(xcrun --sdk iphoneos -f swiftc)"
+
+          rm -rf build
+          mkdir -p build/ModuleCache
+
+          # Compile the Objective-C constructor separately. The exported
+          # WISEOverlayKitBootstrap symbol is resolved when swiftc links the
+          # object into the final dylib.
+          "$CLANG" \
+            -arch "$IOS_ARCH" \
+            -isysroot "$SDK_PATH" \
+            -miphoneos-version-min="$IOS_DEPLOYMENT_TARGET" \
+            -fobjc-arc \
+            -fmodules \
+            -fmodules-cache-path="$PWD/build/ModuleCache" \
+            -c WISEOverlayKit/WISEModuleInit.m \
+            -o build/WISEModuleInit.o
+
+          # The Swift sources import UIKit, Network, and Foundation. Passing
+          # the Objective-C object as an input makes it part of the same
+          # dynamic library rather than producing a second binary.
+          "$SWIFTC" \
+            -target "${IOS_ARCH}-apple-ios${IOS_DEPLOYMENT_TARGET}" \
+            -sdk "$SDK_PATH" \
+            -parse-as-library \
+            -emit-library \
+            -emit-module \
+            -module-name WISEOverlayKit \
+            -emit-module-path build/WISEOverlayKit.swiftmodule \
+            -module-cache-path build/ModuleCache \
+            -Xcc -fmodules \
+            -Xcc "-fmodules-cache-path=$PWD/build/ModuleCache" \
+            -Xlinker -install_name \
+            -Xlinker "@rpath/WISEOverlayKit.dylib" \
+            -Xlinker -compatibility_version \
+            -Xlinker 1 \
+            -Xlinker -current_version \
+            -Xlinker 1 \
+            -framework Foundation \
+            -framework UIKit \
+            -framework Network \
+            WISEOverlayKit/*.swift \
+            build/WISEModuleInit.o \
+            -o build/WISEOverlayKit.dylib
+
+          echo "Built artifact:"
+          file build/WISEOverlayKit.dylib
+          xcrun --sdk iphoneos lipo -info build/WISEOverlayKit.dylib
+          xcrun --sdk iphoneos otool -L build/WISEOverlayKit.dylib
+
+      - name: Upload WISEOverlayKit dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: WISEOverlayKit-dylib
+          path: build/WISEOverlayKit.dylib
+          if-no-files-found: error
+          retention-days: 14
